@@ -1,4 +1,16 @@
-"""QQ 开放平台 WebSocket 客户端：鉴权、心跳、收发消息"""
+"""
+QQ 开放平台 WebSocket 客户端
+
+负责:
+    - 鉴权: 获取并自动刷新 access_token
+    - 网关: 通过 WebSocket 连接 QQ 开放平台
+    - 心跳: 按服务端要求的间隔发送心跳包
+    - 收发: 接收频道/群/私聊消息，通过回调处理后自动回复
+    - 去重: 同一条消息仅处理一次，防止重复回复
+
+WebSocket 协议流程:
+    Hello(op=10) → Identify(op=2) → Ready(op=0) → 心跳 + 事件循环
+"""
 
 import asyncio
 import json
@@ -15,17 +27,28 @@ from qq_adapter_protocol import MessageRequest, MessageResponse, MessageSource
 
 logger = logging.getLogger("qq-adapter")
 
+# 默认订阅的事件意图:
+#   bit 0  — GUILDS (频道事件)
+#   bit 1  — GUILD_MEMBERS (频道成员事件)
+#   bit 25 — GROUP_AND_C2C_EVENT (群聊和私聊事件)
+#   bit 30 — PUBLIC_GUILD_MESSAGES (公域频道消息)
 DEFAULT_INTENTS = (1 << 0) | (1 << 1) | (1 << 25) | (1 << 30)
+
+# 消息去重缓存容量，超出后按 FIFO 淘汰
 MSG_DEDUP_CACHE_SIZE = 1000
 
+# 消息回调签名: 接收 MessageRequest，返回 MessageResponse
 MessageCallback = Callable[[MessageRequest], Awaitable[MessageResponse]]
 
 
 async def _default_callback(request: MessageRequest) -> MessageResponse:
+    """默认回调：原样回显消息内容"""
     return MessageResponse(content=request.content)
 
 
 class QQBot:
+    """QQ 开放平台 Bot 客户端"""
+
     API_BASE = "https://api.sgroup.qq.com"
     AUTH_URL = "https://bots.qq.com/app/getAppAccessToken"
 
@@ -38,6 +61,14 @@ class QQBot:
         on_message: Optional[MessageCallback] = None,
         proxy: Optional[str] = None,
     ):
+        """
+        Args:
+            app_id:     QQ 开放平台 AppID
+            app_secret: QQ 开放平台 AppSecret
+            intents:    事件订阅意图位掩码
+            on_message: 消息回调函数，不传则使用默认回显
+            proxy:      出站 HTTP 代理地址（用于 IP 白名单场景）
+        """
         self.app_id = app_id
         self.app_secret = app_secret
         self.intents = intents
@@ -59,6 +90,7 @@ class QQBot:
     # -------- access token --------
 
     async def _get_access_token(self) -> str:
+        """获取 access_token，过期前自动刷新"""
         now = datetime.now(timezone.utc)
         if (
             self._access_token
@@ -77,6 +109,7 @@ class QQBot:
             raise RuntimeError(f"鉴权失败: {data}")
 
         self._access_token = data["access_token"]
+        # 提前 30 秒过期，留出刷新余量
         self._token_expires_at = now + timedelta(
             seconds=int(data["expires_in"]) - 30
         )
@@ -84,6 +117,7 @@ class QQBot:
         return self._access_token
 
     async def _auth_headers(self) -> dict[str, str]:
+        """构建 QQ API 鉴权请求头"""
         token = await self._get_access_token()
         return {
             "Authorization": f"QQBot {token}",
@@ -94,11 +128,13 @@ class QQBot:
 
     @property
     def _http(self) -> aiohttp.ClientSession:
+        """获取 HTTP 会话，未启动时抛出异常"""
         if self._session is None or self._session.closed:
             raise RuntimeError("QQBot 尚未启动, 请先调用 run()")
         return self._session
 
     async def api_get(self, path: str) -> dict:
+        """调用 QQ 开放平台 GET 接口"""
         headers = await self._auth_headers()
         async with self._http.get(
             f"{self.API_BASE}{path}", headers=headers, proxy=self.proxy
@@ -106,6 +142,7 @@ class QQBot:
             return await resp.json()
 
     async def api_post(self, path: str, body: dict) -> dict:
+        """调用 QQ 开放平台 POST 接口"""
         headers = await self._auth_headers()
         async with self._http.post(
             f"{self.API_BASE}{path}", headers=headers, json=body, proxy=self.proxy
@@ -117,6 +154,7 @@ class QQBot:
     # -------- 发送消息 --------
 
     async def reply_guild(self, channel_id: str, msg_id: str, content: str):
+        """回复频道消息"""
         await self.api_post(f"/channels/{channel_id}/messages", {
             "content": content,
             "msg_id": msg_id,
@@ -124,6 +162,7 @@ class QQBot:
 
     async def reply_group(self, group_openid: str, msg_id: str,
                           content: str, msg_seq: int = 1):
+        """回复群消息"""
         await self.api_post(f"/v2/groups/{group_openid}/messages", {
             "msg_type": 0,
             "content": content,
@@ -134,6 +173,7 @@ class QQBot:
 
     async def reply_c2c(self, openid: str, msg_id: str,
                         content: str, msg_seq: int = 1):
+        """回复私聊消息"""
         await self.api_post(f"/v2/users/{openid}/messages", {
             "msg_type": 0,
             "content": content,
@@ -143,11 +183,13 @@ class QQBot:
         })
 
     def next_seq(self, key: str) -> int:
+        """生成递增的消息序列号（群/私聊发送需要）"""
         self._msg_seq[key] = self._msg_seq.get(key, 0) + 1
         return self._msg_seq[key]
 
     async def send_message(self, source: MessageSource, source_id: str,
                            content: str, msg_id: str = ""):
+        """统一发送接口，根据消息来源类型自动路由"""
         if source == MessageSource.GUILD:
             await self.reply_guild(source_id, msg_id, content)
         elif source == MessageSource.GROUP:
@@ -159,6 +201,7 @@ class QQBot:
 
     # -------- 事件分发 --------
 
+    # QQ 事件类型 → 消息来源枚举的映射
     _EVENT_SOURCE_MAP: dict[str, MessageSource] = {
         "AT_MESSAGE_CREATE": MessageSource.GUILD,
         "GROUP_AT_MESSAGE_CREATE": MessageSource.GROUP,
@@ -166,6 +209,7 @@ class QQBot:
     }
 
     def _build_request(self, event_type: str, data: dict) -> Optional[MessageRequest]:
+        """将 QQ 原始事件数据解析为 MessageRequest，非消息事件返回 None"""
         source = self._EVENT_SOURCE_MAP.get(event_type)
         if source is None:
             return None
@@ -194,6 +238,7 @@ class QQBot:
         )
 
     def _mark_replied(self, msg_id: str) -> bool:
+        """标记消息已处理。返回 True 表示首次处理，False 表示重复消息"""
         if msg_id in self._replied_msgs:
             return False
         self._replied_msgs[msg_id] = None
@@ -202,12 +247,14 @@ class QQBot:
         return True
 
     def _spawn_task(self, coro) -> asyncio.Task:
+        """创建后台任务并自动管理生命周期"""
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
 
     async def _dispatch_message(self, event_type: str, data: dict):
+        """事件分发：解析消息 → 去重 → 异步处理"""
         request = self._build_request(event_type, data)
         if request is None:
             logger.debug("非消息事件 %s, 跳过回调", event_type)
@@ -220,9 +267,11 @@ class QQBot:
         logger.info("收到消息 [%s] %s: %s", request.source.value,
                      request.sender_id, request.content[:100])
 
+        # 在后台任务中处理，不阻塞 WebSocket 事件循环
         self._spawn_task(self._handle_and_reply(request))
 
     async def _handle_and_reply(self, request: MessageRequest):
+        """调用回调处理消息并发送回复"""
         try:
             response = await self.on_message(request)
         except Exception:
@@ -242,6 +291,7 @@ class QQBot:
 
     async def _heartbeat_loop(self, ws: aiohttp.ClientWebSocketResponse,
                               interval: float):
+        """按固定间隔发送心跳包，维持 WebSocket 连接"""
         while True:
             await asyncio.sleep(interval)
             await ws.send_json({"op": 1, "d": self._seq})
@@ -250,6 +300,7 @@ class QQBot:
     # -------- 主循环 --------
 
     async def run(self):
+        """启动 Bot：建立 HTTP 会话 → 连接 WebSocket → 进入事件循环"""
         self._running = True
         self._session = aiohttp.ClientSession()
         try:
@@ -258,6 +309,7 @@ class QQBot:
             await self._cleanup()
 
     async def _connect(self):
+        """完整的 WebSocket 连接流程：鉴权 → 获取网关 → Hello → Identify → Ready"""
         token = await self._get_access_token()
 
         gw = await self.api_get("/gateway/bot")
@@ -268,12 +320,14 @@ class QQBot:
 
         self._ws = await self._http.ws_connect(ws_url, proxy=self.proxy)
         try:
+            # 1. 接收 Hello，获取心跳间隔
             hello = await self._ws.receive_json()
             if hello.get("op") != 10:
                 raise RuntimeError(f"期望 Hello(op=10), 收到 {hello}")
             heartbeat_interval = hello["d"]["heartbeat_interval"] / 1000
             logger.info("心跳间隔: %.1fs", heartbeat_interval)
 
+            # 2. 发送 Identify 进行鉴权
             await self._ws.send_json({
                 "op": 2,
                 "d": {
@@ -289,6 +343,7 @@ class QQBot:
             })
             logger.info("已发送鉴权 Identify")
 
+            # 3. 接收 Ready，确认上线
             ready = await self._ws.receive_json()
             if ready.get("op") == 9:
                 raise RuntimeError(f"鉴权失败 (Invalid Session): {ready}")
@@ -300,9 +355,12 @@ class QQBot:
             bot_name = ready["d"]["user"].get("username", "?")
             logger.info("Bot [%s] 已上线, session=%s", bot_name, self._session_id)
 
+            # 4. 启动心跳循环
             self._hb_task = asyncio.create_task(
                 self._heartbeat_loop(self._ws, heartbeat_interval)
             )
+
+            # 5. 进入事件循环
             await self._event_loop(self._ws)
         finally:
             if self._hb_task:
@@ -312,6 +370,7 @@ class QQBot:
                 await self._ws.close()
 
     async def _event_loop(self, ws: aiohttp.ClientWebSocketResponse):
+        """WebSocket 事件循环：持续接收并分发服务端推送的事件"""
         async for msg in ws:
             if not self._running:
                 break
@@ -320,18 +379,19 @@ class QQBot:
                 payload = json.loads(msg.data)
                 op = payload.get("op")
 
+                # 更新序列号（用于心跳和断线重连）
                 if payload.get("s") is not None:
                     self._seq = payload["s"]
 
-                if op == 0:
+                if op == 0:       # Dispatch: 业务事件
                     event_type = payload.get("t", "")
                     await self._dispatch_message(event_type, payload.get("d", {}))
-                elif op == 11:
+                elif op == 11:    # Heartbeat ACK
                     logger.debug("心跳 ACK")
-                elif op == 7:
+                elif op == 7:     # Reconnect: 服务端要求重连
                     logger.warning("服务器要求重连")
                     break
-                elif op == 9:
+                elif op == 9:     # Invalid Session
                     logger.error("Invalid Session, 需重新鉴权")
                     break
                 else:
@@ -344,6 +404,7 @@ class QQBot:
     # -------- 停止 --------
 
     async def stop(self):
+        """优雅停止 Bot：取消心跳和所有后台任务，关闭 WebSocket"""
         logger.info("正在停止 QQBot...")
         self._running = False
         if self._hb_task:
@@ -358,6 +419,7 @@ class QQBot:
             await self._ws.close()
 
     async def _cleanup(self):
+        """清理 HTTP 会话"""
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
