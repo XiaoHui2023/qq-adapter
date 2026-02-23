@@ -1,4 +1,4 @@
-from .qq_client import QQClient
+from .qq_client import QQBot
 from .http_server import HttpServer
 
-__all__ = ["QQClient", "HttpServer"]
+__all__ = ["QQBot", "HttpServer"]

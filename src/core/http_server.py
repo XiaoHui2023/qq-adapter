@@ -1,5 +1,6 @@
 """HTTP 服务端：对外暴露 API 接口、转发 webhook"""
 
+import json
 import logging
 from typing import Optional
 
@@ -7,7 +8,7 @@ import aiohttp
 from aiohttp import web
 
 from qq_adapter_protocol import MessageRequest, MessageResponse, MessageSource
-from .qq_client import QQClient
+from .qq_client import QQBot
 
 logger = logging.getLogger("qq-adapter")
 
@@ -15,7 +16,7 @@ logger = logging.getLogger("qq-adapter")
 class HttpServer:
     def __init__(
         self,
-        qq_client: QQClient,
+        qq_client: QQBot,
         *,
         webhook_url: Optional[str] = None,
         host: str = "0.0.0.0",
@@ -43,9 +44,13 @@ class HttpServer:
         }
         try:
             async with self.qq_client._http.post(
-                self.webhook_url, json=payload, proxy=self.qq_client.proxy
+                self.webhook_url, json=payload
             ) as resp:
-                data = await resp.json()
+                body = await resp.text()
+                if resp.status != 200:
+                    logger.error("Webhook 返回 %d: %s", resp.status, body[:200])
+                    return MessageResponse(content=None)
+                data = json.loads(body)
                 return MessageResponse(content=data.get("content"))
         except Exception:
             logger.exception("Webhook 请求失败: %s", self.webhook_url)

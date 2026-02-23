@@ -25,7 +25,7 @@ async def _default_callback(request: MessageRequest) -> MessageResponse:
     return MessageResponse(content=request.content)
 
 
-class QQClient:
+class QQBot:
     API_BASE = "https://api.sgroup.qq.com"
     AUTH_URL = "https://bots.qq.com/app/getAppAccessToken"
 
@@ -95,7 +95,7 @@ class QQClient:
     @property
     def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            raise RuntimeError("QQClient 尚未启动, 请先调用 run()")
+            raise RuntimeError("QQBot 尚未启动, 请先调用 run()")
         return self._session
 
     async def api_get(self, path: str) -> dict:
@@ -344,7 +344,7 @@ class QQClient:
     # -------- 停止 --------
 
     async def stop(self):
-        logger.info("正在停止 QQClient...")
+        logger.info("正在停止 QQBot...")
         self._running = False
         if self._hb_task:
             self._hb_task.cancel()
@@ -361,4 +361,4 @@ class QQClient:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
-        logger.info("QQClient 已停止")
+        logger.info("QQBot 已停止")

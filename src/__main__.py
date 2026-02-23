@@ -3,7 +3,7 @@ import asyncio
 import os
 
 from config import load_env, setup_logging
-from core import QQClient, HttpServer
+from core import QQBot, HttpServer
 
 
 def parse_args():
@@ -26,7 +26,7 @@ async def main():
     host = args.host or os.environ.get("HTTP_HOST", "0.0.0.0")
     port = args.port or int(os.environ.get("HTTP_PORT", "8080"))
 
-    client = QQClient(
+    client = QQBot(
         app_id=os.environ["APP_ID"],
         app_secret=os.environ["APP_SECRET"],
         proxy=os.environ.get("PROXY"),
