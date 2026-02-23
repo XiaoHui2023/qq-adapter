@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qq-adapter-protocol"
+version = "0.1.0"
+description = "QQ Adapter 通信协议，定义消息收发的公共数据结构"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+
+[project.urls]
+Repository = "https://github.com/XiaoHui2023/qq-adapter"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qq_adapter_protocol"]
