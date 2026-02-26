@@ -39,7 +39,7 @@ class QQAdapterClient:
     可选连接服务端进行 TCP 连通性检测、心跳检测和断连感知。
 
     用法（单客户端）:
-        client = QQAdapterClient("127.0.0.1", 5000, server_url="http://127.0.0.1:8080")
+        client = QQAdapterClient(5000, server_url="http://127.0.0.1:8080")
 
         @client.on_connect
         async def connected():
@@ -54,17 +54,19 @@ class QQAdapterClient:
     用法（多客户端）:
         from qq_adapter_protocol import run_all
         run_all(
-            ("127.0.0.1", 5000, handler_a),
-            ("127.0.0.1", 5001, handler_b),
+            (handler_a, 5000),
+            (handler_b, None, "http://127.0.0.1:8080"),
         )
+
+    port 为 None 时，操作系统会自动分配一个可用端口。
     """
 
     def __init__(
         self,
-        host: str = "127.0.0.1",
-        port: int = 5000,
+        port: Optional[int] = None,
         path: str = "/webhook",
         server_url: Optional[str] = None,
+        host: str = "127.0.0.1",
     ):
         self.host = host
         self.port = port
@@ -195,14 +197,23 @@ class QQAdapterClient:
         1. 启动 HTTP 服务器接收 webhook 推送
         2. 如果配置了 server_url，等待服务端就绪
         3. 启动后台心跳任务持续监测连接状态
+
+        当 port 为 None 时，绑定 0 端口让 OS 自动分配，启动后回填实际端口。
         """
         self._handler = handler
 
         app = self._create_app()
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
+
+        bind_port = self.port if self.port is not None else 0
+        site = web.TCPSite(self._runner, self.host, bind_port)
         await site.start()
+
+        if self.port is None:
+            sock = site._server.sockets[0]  # type: ignore[union-attr]
+            self.port = sock.getsockname()[1]
+
         logger.info("客户端已启动: http://%s:%s%s", self.host, self.port, self.path)
 
         if self.server_url:
@@ -250,12 +261,10 @@ class QQAdapterClient:
 async def _run_all_main(groups):
     clients = []
     for group in groups:
-        if len(group) == 3:
-            host, port, handler = group
-            server_url = None
-        else:
-            host, port, handler, server_url = group
-        client = QQAdapterClient(host, port, server_url=server_url)
+        handler = group[0]
+        port = group[1] if len(group) > 1 else None
+        server_url = group[2] if len(group) > 2 else None
+        client = QQAdapterClient(port=port, server_url=server_url)
         await client.start(handler)
         clients.append(client)
     try:
@@ -271,10 +280,15 @@ def run_all(*groups):
     """
     一次性阻塞启动多个客户端。
 
+    每个 group 是一个元组: (handler, port, server_url)
+    - handler: 必传，消息处理回调
+    - port: 可选，监听端口，None 时自动分配
+    - server_url: 可选，服务端地址
+
     用法:
         run_all(
-            ("127.0.0.1", 5000, handler_a),
-            ("127.0.0.1", 5001, handler_b, "http://127.0.0.1:8080"),
+            (handler_a, 5000),
+            (handler_b, None, "http://127.0.0.1:8080"),
         )
     """
     asyncio.run(_run_all_main(groups))

@@ -83,7 +83,13 @@ from qq_adapter_protocol import QQAdapterClient, MessageRequest, MessageResponse
 async def handle(msg: MessageRequest) -> MessageResponse:
     return MessageResponse(content=msg.content + "（已处理）")
 
-QQAdapterClient("127.0.0.1", 5000).run(handle)
+QQAdapterClient(5000).run(handle)
+```
+
+`port` 为 `None` 时，操作系统会自动分配一个可用端口，避免端口冲突：
+
+```python
+QQAdapterClient().run(handle)  # 自动分配端口
 ```
 
 ### 多客户端并发
@@ -99,8 +105,8 @@ async def handler_b(msg: MessageRequest) -> MessageResponse:
     return MessageResponse(content=f"Bot B: {msg.content}")
 
 async def main():
-    client_a = QQAdapterClient("127.0.0.1", 5001)
-    client_b = QQAdapterClient("127.0.0.1", 5002)
+    client_a = QQAdapterClient(5001)
+    client_b = QQAdapterClient(5002)
     await client_a.start(handler_a)
     await client_b.start(handler_b)
     try:
@@ -115,9 +121,11 @@ asyncio.run(main())
 ### 批量启动（便捷方式）
 
 ```python
-QQAdapterClient.run_all(
-    (QQAdapterClient("127.0.0.1", 5001), handler_a),
-    (QQAdapterClient("127.0.0.1", 5002), handler_b),
+from qq_adapter_protocol import run_all
+
+run_all(
+    (handler_a, 5001),
+    (handler_b, 5002, "http://127.0.0.1:8080"),
 )
 ```
 
@@ -125,13 +133,14 @@ QQAdapterClient.run_all(
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `host` | `str` | `"127.0.0.1"` | 监听地址 |
-| `port` | `int` | `5000` | 监听端口 |
+| `port` | `int \| None` | `None` | 监听端口，`None` 时自动分配 |
 | `path` | `str` | `"/webhook"` | Webhook 路径 |
+| `server_url` | `str \| None` | `None` | 服务端地址，用于连通性检测和心跳 |
+| `host` | `str` | `"127.0.0.1"` | 监听地址 |
 
 | 方法 | 说明 |
 |------|------|
 | `run(handler)` | 阻塞运行，适合单客户端 |
 | `await start(handler)` | 非阻塞启动，适合多客户端或嵌入 asyncio 应用 |
 | `await stop()` | 停止客户端 |
-| `run_all(*pairs)` | 静态方法，批量阻塞启动多个客户端 |
+| `run_all(*groups)` | 批量阻塞启动多个客户端，每个 group 为 `(handler, port, server_url)` |
