@@ -26,7 +26,10 @@ def load_env(env_path: Optional[str] = None):
     load_dotenv(path)
 
 
-def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO):
+def setup_logging(
+    log_dir: Optional[str] = None,
+    level: str | int = logging.INFO,
+):
     """
     配置全局日志。
 
@@ -35,8 +38,11 @@ def setup_logging(log_dir: Optional[str] = None, level: int = logging.INFO):
 
     Args:
         log_dir: 日志输出目录，None 表示仅控制台输出
-        level:   日志级别，默认 INFO
+        level:   日志级别，支持字符串 ("DEBUG"/"INFO"/…) 或 int
     """
+    if isinstance(level, str):
+        level = getattr(logging, level.upper(), logging.INFO)
+
     fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
