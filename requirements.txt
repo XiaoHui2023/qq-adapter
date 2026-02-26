@@ -1,2 +1,3 @@
 aiohttp==3.13.3
 python-dotenv==1.2.1
+qq-adapter-protocol
