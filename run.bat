@@ -11,5 +11,5 @@ if not exist .venv (
     call .venv\Scripts\activate.bat
 )
 
-python src --port 8080 --log log
+python src config.yaml
 pause
