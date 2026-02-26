@@ -27,6 +27,27 @@ from .models import MessageRequest, MessageResponse, MessageSource
 
 logger = logging.getLogger("qq-adapter-client")
 
+
+def _ensure_serializable(obj):
+    """将对象转换为 JSON 可序列化格式"""
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [_ensure_serializable(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _ensure_serializable(v) for k, v in obj.items()}
+    # dataclass、Pydantic 等
+    if hasattr(obj, "__dataclass_fields__"):
+        return _ensure_serializable(asdict(obj))
+    if hasattr(obj, "model_dump"):
+        return _ensure_serializable(obj.model_dump())
+    if hasattr(obj, "dict"):
+        return _ensure_serializable(obj.dict())
+    # 其他对象转字符串
+    return str(obj)
+
 MessageHandler = Callable[
     [MessageRequest], Union[MessageResponse, Awaitable[MessageResponse]]
 ]
@@ -208,9 +229,10 @@ class QQAdapterClient:
             logger.exception("消息处理回调异常")
             result = MessageResponse(content=None)
 
+        content = getattr(result, "content", result)
         response = {
             "msg_id": request.msg_id,
-            "content": result.content,
+            "content": _ensure_serializable(content),
         }
 
         if self._ws and not self._ws.closed:
