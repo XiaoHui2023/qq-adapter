@@ -188,7 +188,7 @@ class QQAdapterClient:
             try:
                 async for msg in self._ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
-                        await self._handle_message(msg.data)
+                        asyncio.create_task(self._handle_message(msg.data))
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         break
             except Exception:
