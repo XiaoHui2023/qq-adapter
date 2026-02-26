@@ -10,5 +10,5 @@ if not exist .venv (
     call .venv\Scripts\activate.bat
 )
 
-python src/
+python src --port 8080 --log log
 pause

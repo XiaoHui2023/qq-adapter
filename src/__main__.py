@@ -4,7 +4,7 @@ QQ Adapter 入口脚本
 用法:
     python src/                          # 使用默认配置启动
     python src/ --host 0.0.0.0 --port 9090  # 指定 HTTP 监听地址
-    python src/ --log-file bot.log       # 日志同时输出到文件
+    python src/ --log log/               # 日志同时输出到目录
     python src/ --env /path/to/.env      # 指定环境变量文件
 
 启动流程:
@@ -33,8 +33,8 @@ def parse_args():
         help=".env 文件路径 (默认: src/.env)",
     )
     p.add_argument(
-        "--log-file", default=None,
-        help="日志输出文件路径，不指定则仅输出到控制台",
+        "--log", default=None,
+        help="日志输出目录，不指定则仅输出到控制台",
     )
     p.add_argument(
         "--host", default=None,
@@ -51,7 +51,7 @@ async def main():
     args = parse_args()
 
     load_env(args.env)
-    setup_logging(log_file=args.log_file)
+    setup_logging(log_dir=args.log)
 
     # 命令行参数优先，其次环境变量，最后使用默认值
     host = args.host or os.environ.get("HTTP_HOST", "0.0.0.0")
