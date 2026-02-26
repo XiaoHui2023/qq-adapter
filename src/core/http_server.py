@@ -1,12 +1,13 @@
 """
-HTTP 服务端
+HTTP / WebSocket 服务端
 
 负责:
-    - Webhook 转发: 收到 QQ 消息后 POST 到外部业务服务，用响应内容回复
+    - /ws:          WebSocket 端点，承载消息推送、回复返回和心跳保活
     - /api/send:    供外部服务主动向 QQ 发送消息
     - /api/health:  健康检查接口
 """
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -19,73 +20,109 @@ from .qq_bot import QQBot
 
 logger = logging.getLogger("qq-adapter")
 
+# 等待客户端回复的超时秒数
+WS_REPLY_TIMEOUT = 60
+
 
 class HttpServer:
-    """对外 HTTP 服务端，搭配 QQBot 使用"""
+    """对外 HTTP + WebSocket 服务端，搭配 QQBot 使用"""
 
     def __init__(
         self,
         qq_bot: QQBot,
         *,
-        webhook_url: Optional[str] = None,
         host: str = "0.0.0.0",
         port: int = 8080,
     ):
-        """
-        Args:
-            qq_bot:   QQBot 实例，用于发送消息和复用 HTTP 会话
-            webhook_url: Webhook 推送地址，配置后自动接管 QQBot 的消息回调
-            host:        HTTP 监听地址
-            port:        HTTP 监听端口
-        """
         self.qq_bot = qq_bot
-        self.webhook_url = webhook_url
         self.host = host
         self.port = port
         self._runner: Optional[web.AppRunner] = None
 
-        # 配置了 webhook 时，自动将 QQBot 的消息回调替换为 webhook 转发
-        if webhook_url:
-            self.qq_bot.on_message = self._webhook_callback
+        self._clients: set[web.WebSocketResponse] = set()
+        self._pending: dict[str, asyncio.Future[MessageResponse]] = {}
 
-    # -------- webhook 回调 --------
+        self.qq_bot.on_message = self._ws_broadcast
 
-    async def _webhook_callback(self, request: MessageRequest) -> MessageResponse:
+    # -------- WebSocket 端点 --------
+
+    async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+        """GET /ws — WebSocket 连接入口"""
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+
+        self._clients.add(ws)
+        peer = request.remote
+        logger.info("WebSocket 客户端已连接: %s (当前 %d 个)", peer, len(self._clients))
+
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        continue
+                    msg_id = data.get("msg_id", "")
+                    fut = self._pending.get(msg_id)
+                    if fut and not fut.done():
+                        fut.set_result(MessageResponse(content=data.get("content")))
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.warning("WebSocket 错误: %s", ws.exception())
+        finally:
+            self._clients.discard(ws)
+            logger.info("WebSocket 客户端已断开: %s (剩余 %d 个)", peer, len(self._clients))
+
+        return ws
+
+    # -------- 广播回调 --------
+
+    async def _ws_broadcast(self, request: MessageRequest) -> MessageResponse:
         """
-        将收到的 QQ 消息转发到 webhook_url。
+        将 QQ 消息广播给所有 WebSocket 客户端，等待第一个回复。
 
-        发送 JSON:
+        发送 JSON (与原 webhook 格式一致):
             {"source", "content", "msg_id", "event_type", "source_id", "sender_id"}
 
-        期望响应 JSON:
-            {"content": "回复内容"}  # content 为 null 时不回复
+        期望客户端回复 JSON:
+            {"msg_id": "对应的消息ID", "content": "回复内容"}
         """
-        payload = {
+        if not self._clients:
+            logger.warning("没有已连接的 WebSocket 客户端，无法转发消息")
+            return MessageResponse(content=None)
+
+        payload = json.dumps({
             "source": request.source.value,
             "content": request.content,
             "msg_id": request.msg_id,
             "event_type": request.event_type,
             "source_id": request.source_id,
             "sender_id": request.sender_id,
-        }
+        }, ensure_ascii=False)
+
+        fut: asyncio.Future[MessageResponse] = asyncio.get_running_loop().create_future()
+        self._pending[request.msg_id] = fut
+
+        dead: set[web.WebSocketResponse] = set()
+        for ws in self._clients:
+            try:
+                await ws.send_str(payload)
+            except Exception:
+                dead.add(ws)
+        self._clients -= dead
+
         try:
-            async with self.qq_bot._http.post(
-                self.webhook_url, json=payload
-            ) as resp:
-                body = await resp.text()
-                if resp.status != 200:
-                    logger.error("Webhook 返回 %d: %s", resp.status, body[:200])
-                    return MessageResponse(content=None)
-                data = json.loads(body)
-                return MessageResponse(content=data.get("content"))
-        except Exception:
-            logger.exception("Webhook 请求失败: %s", self.webhook_url)
+            return await asyncio.wait_for(fut, timeout=WS_REPLY_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning("等待客户端回复超时: %s", request.msg_id)
             return MessageResponse(content=None)
+        finally:
+            self._pending.pop(request.msg_id, None)
 
     # -------- HTTP 路由 --------
 
     def _create_app(self) -> web.Application:
         app = web.Application()
+        app.router.add_get("/ws", self._handle_ws)
         app.router.add_post("/api/send", self._handle_send)
         app.router.add_get("/api/health", self._handle_health)
         return app
@@ -95,6 +132,7 @@ class HttpServer:
         return web.json_response({
             "ok": True,
             "running": self.qq_bot._running,
+            "ws_clients": len(self._clients),
         })
 
     async def _handle_send(self, request: web.Request) -> web.Response:
@@ -143,16 +181,25 @@ class HttpServer:
     # -------- 启停 --------
 
     async def start(self):
-        """启动 HTTP 服务"""
+        """启动 HTTP + WebSocket 服务"""
         app = self._create_app()
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         await site.start()
-        logger.info("HTTP 服务端已启动: http://%s:%d", self.host, self.port)
+        logger.info("HTTP 服务端已启动: http://%s:%d (WebSocket: /ws)", self.host, self.port)
 
     async def stop(self):
-        """停止 HTTP 服务"""
+        """停止服务，关闭所有 WebSocket 连接"""
+        for ws in list(self._clients):
+            await ws.close()
+        self._clients.clear()
+
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+
         if self._runner:
             await self._runner.cleanup()
             self._runner = None

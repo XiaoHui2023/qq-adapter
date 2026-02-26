@@ -51,7 +51,6 @@ async def main():
 
     server = HttpServer(
         client,
-        webhook_url=cfg.server.webhook_url,
         host=cfg.server.host,
         port=cfg.server.port,
     )

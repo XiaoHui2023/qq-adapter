@@ -280,11 +280,14 @@ class QQBot:
             return
 
         if response.content is None:
+            logger.debug("消息 %s 无需回复, 跳过", request.msg_id)
             return
 
         try:
             await self.send_message(request.source, request.source_id,
                                     response.content, request.msg_id)
+            logger.info("已回复消息 [%s] %s: %s", request.source.value,
+                        request.sender_id, response.content[:100])
         except Exception:
             logger.exception("回复消息 %s 时出错", request.msg_id)
 

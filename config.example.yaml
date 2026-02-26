@@ -6,10 +6,7 @@
 # HTTP 服务配置
 server:
   host: "0.0.0.0"          # 监听地址
-  port: 8080               # 监听端口
-  webhook_url: ~           # Webhook 推送地址，收到消息后 POST 到此地址
-                           # 业务服务返回 {"content": "回复内容"} 即可自动回复
-                           # 不配置时默认原样回显（echo）
+  port: 8080               # 监听端口（同时提供 HTTP API 和 WebSocket /ws 端点）
 
 # 日志配置
 log:

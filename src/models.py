@@ -15,7 +15,6 @@ import yaml
 class ServerConfig(BaseModel):
     host: str = Field("0.0.0.0", description="HTTP 监听地址")
     port: int = Field(8080, description="HTTP 监听端口")
-    webhook_url: Optional[str] = Field(None, description="Webhook 推送地址")
 
 
 class LogConfig(BaseModel):

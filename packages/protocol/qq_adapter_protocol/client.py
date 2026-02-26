@@ -1,8 +1,8 @@
 """
-QQ Adapter Webhook 客户端
+QQ Adapter WebSocket 客户端
 
-封装 HTTP 服务器样板代码，用户只需提供回调函数即可处理消息。
-支持 TCP 连通性检测、心跳检测、自动重连和生命周期事件。
+通过 WebSocket 连接 QQ Adapter 服务端，接收消息推送并返回回复。
+支持自动重连和生命周期事件。
 
 依赖:
     pip install qq-adapter-protocol[client]
@@ -10,12 +10,13 @@ QQ Adapter Webhook 客户端
 
 import asyncio
 import inspect
+import json
 import logging
 from dataclasses import asdict
 from typing import Callable, Union, Awaitable, Optional
 
 try:
-    from aiohttp import web
+    import aiohttp
 except ImportError:
     raise ImportError(
         "客户端功能需要 aiohttp，请执行: pip install qq-adapter-protocol[client]"
@@ -33,13 +34,13 @@ LifecycleHook = Callable[[], Union[None, Awaitable[None]]]
 
 class QQAdapterClient:
     """
-    QQ Adapter Webhook 客户端
+    QQ Adapter WebSocket 客户端
 
-    接收 QQ Adapter 服务端推送的消息，交给回调函数处理后返回回复。
-    可选连接服务端进行 TCP 连通性检测、心跳检测和断连感知。
+    通过 WebSocket 连接 QQ Adapter 服务端，接收消息推送，
+    交给回调函数处理后将回复通过同一连接发回。
 
     用法（单客户端）:
-        client = QQAdapterClient(5000, server_url="http://127.0.0.1:8080")
+        client = QQAdapterClient("http://127.0.0.1:8080")
 
         @client.on_connect
         async def connected():
@@ -54,28 +55,19 @@ class QQAdapterClient:
     用法（多客户端）:
         from qq_adapter_protocol import run_all
         run_all(
-            {"handler": handler_a, "port": 5000},
-            {"handler": handler_b, "server_url": "http://127.0.0.1:8080"},
+            {"handler": handler_a, "server_url": "http://127.0.0.1:8080"},
+            {"handler": handler_b, "server_url": "http://10.0.0.1:8080"},
         )
-
-    port 为 None 时，操作系统会自动分配一个可用端口。
     """
 
-    def __init__(
-        self,
-        port: Optional[int] = None,
-        path: str = "/webhook",
-        server_url: Optional[str] = None,
-        host: str = "127.0.0.1",
-    ):
-        self.host = host
-        self.port = port
-        self.path = path
-        self.server_url = server_url.rstrip("/") if server_url else None
+    def __init__(self, server_url: str):
+        self.server_url = server_url.rstrip("/")
 
         self._handler: Optional[MessageHandler] = None
-        self._runner: Optional[web.AppRunner] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_task: Optional[asyncio.Task] = None
+        self._running = False
 
         self._connected = False
         self._on_connect: Optional[LifecycleHook] = None
@@ -120,7 +112,7 @@ class QQAdapterClient:
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         try:
-            reader, writer = await asyncio.wait_for(
+            _, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=5
             )
             writer.close()
@@ -130,41 +122,67 @@ class QQAdapterClient:
             return False
 
     async def _wait_for_server(self, interval: float = 2):
-        """轮询服务端，直到连接成功（无限重试）"""
-        while True:
+        """轮询服务端，直到 TCP 可达（无限重试）"""
+        logged = False
+        while self._running:
             if await self._check_server():
-                self._connected = True
-                logger.info("已连接到服务端: %s", self.server_url)
-                await self._fire(self._on_connect)
                 return
-            logger.info("等待服务端就绪... (%s)", self.server_url)
+            if not logged:
+                logger.info("等待服务端就绪... (%s)", self.server_url)
+                logged = True
+            else:
+                logger.debug("等待服务端就绪... (%s)", self.server_url)
             await asyncio.sleep(interval)
 
-    async def _heartbeat_loop(self, interval: float = 10):
-        """后台心跳，检测服务端是否断连，断连后持续探测直到恢复"""
-        while True:
-            await asyncio.sleep(interval)
-            alive = await self._check_server()
+    # -------- WebSocket 消息循环 --------
 
-            if alive and not self._connected:
-                self._connected = True
-                logger.info("服务端已重新连接: %s", self.server_url)
-                await self._fire(self._on_connect)
-            elif not alive and self._connected:
+    async def _ws_loop(self):
+        """WebSocket 连接循环：连接 → 收消息 → 断线重连"""
+        ws_url = self.server_url + "/ws"
+        while self._running:
+            await self._wait_for_server()
+            if not self._running:
+                break
+
+            try:
+                self._ws = await self._session.ws_connect(ws_url)
+            except Exception:
+                logger.warning("WebSocket 连接失败，将在 2 秒后重试...")
+                await asyncio.sleep(2)
+                continue
+
+            self._connected = True
+            logger.info("已连接到服务端: %s", ws_url)
+            await self._fire(self._on_connect)
+
+            try:
+                async for msg in self._ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await self._handle_message(msg.data)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+            except Exception:
+                logger.exception("WebSocket 消息循环异常")
+            finally:
                 self._connected = False
-                logger.warning("服务端连接已断开，等待重连... (%s)", self.server_url)
-                await self._fire(self._on_disconnect)
+                if self._ws and not self._ws.closed:
+                    await self._ws.close()
+                self._ws = None
 
-    # -------- Webhook 处理 --------
+            logger.warning("服务端连接已断开，等待重连... (%s)", self.server_url)
+            await self._fire(self._on_disconnect)
 
-    async def _handle_webhook(self, request: web.Request) -> web.Response:
-        """接收 Webhook POST，解析为 MessageRequest，调用回调，返回 MessageResponse"""
+            if self._running:
+                await asyncio.sleep(2)
+
+    async def _handle_message(self, raw: str):
+        """解析服务端推送的消息，调用回调，发回回复"""
         try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"content": None}, status=400)
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return
 
-        msg = MessageRequest(
+        request = MessageRequest(
             source=MessageSource(data["source"]),
             content=data.get("content", ""),
             source_id=data.get("source_id", ""),
@@ -174,19 +192,23 @@ class QQAdapterClient:
         )
 
         try:
-            result = self._handler(msg)
+            result = self._handler(request)
             if inspect.isawaitable(result):
                 result = await result
         except Exception:
             logger.exception("消息处理回调异常")
             result = MessageResponse(content=None)
 
-        return web.json_response(asdict(result))
+        response = {
+            "msg_id": request.msg_id,
+            "content": result.content,
+        }
 
-    def _create_app(self) -> web.Application:
-        app = web.Application()
-        app.router.add_post(self.path, self._handle_webhook)
-        return app
+        if self._ws and not self._ws.closed:
+            try:
+                await self._ws.send_json(response)
+            except Exception:
+                logger.exception("发送回复失败")
 
     # -------- 启停 --------
 
@@ -194,62 +216,45 @@ class QQAdapterClient:
         """
         非阻塞启动客户端。
 
-        1. 启动 HTTP 服务器接收 webhook 推送
-        2. 如果配置了 server_url，等待服务端就绪
-        3. 启动后台心跳任务持续监测连接状态
-
-        当 port 为 None 时，绑定 0 端口让 OS 自动分配，启动后回填实际端口。
+        1. 等待服务端 TCP 可达
+        2. 建立 WebSocket 连接
+        3. 在后台任务中持续接收消息并自动重连
         """
         self._handler = handler
-
-        app = self._create_app()
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-
-        bind_port = self.port if self.port is not None else 0
-        site = web.TCPSite(self._runner, self.host, bind_port)
-        await site.start()
-
-        if self.port is None:
-            sock = site._server.sockets[0]  # type: ignore[union-attr]
-            self.port = sock.getsockname()[1]
-
-        logger.info("客户端已启动: http://%s:%s%s", self.host, self.port, self.path)
-
-        if self.server_url:
-            await self._wait_for_server()
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._running = True
+        self._session = aiohttp.ClientSession()
+        self._ws_task = asyncio.create_task(self._ws_loop())
 
     async def stop(self):
         """停止客户端，清理所有资源"""
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
+        self._running = False
+
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+
+        if self._ws_task and not self._ws_task.done():
+            self._ws_task.cancel()
             try:
-                await self._heartbeat_task
+                await self._ws_task
             except asyncio.CancelledError:
                 pass
-            self._heartbeat_task = None
+            self._ws_task = None
 
         if self._connected:
             self._connected = False
             await self._fire(self._on_disconnect)
 
-        if self._runner:
-            await self._runner.cleanup()
-            self._runner = None
-            logger.info("客户端已停止: %s:%s", self.host, self.port)
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+        logger.info("客户端已停止")
 
     def run(self, handler: MessageHandler):
-        """
-        阻塞运行客户端（单客户端便捷方法）。
-
-        如果配置了 server_url，会先等待服务端就绪，再进入消息接收循环。
-        """
+        """阻塞运行客户端（单客户端便捷方法）。"""
 
         async def _main():
             await self.start(handler)
-            if not self.server_url:
-                logger.info("未配置 server_url，跳过服务端连接检测，仅监听 webhook")
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -260,22 +265,15 @@ class QQAdapterClient:
         asyncio.run(_main())
 
 
-_RUN_ALL_VALID_KEYS = {"handler", "port", "server_url", "host", "path"}
+_RUN_ALL_VALID_KEYS = {"handler", "server_url"}
 
 
 async def _run_all_main(groups):
     clients = []
     for group in groups:
         handler = group["handler"]
-        client = QQAdapterClient(
-            port=group.get("port"),
-            server_url=group.get("server_url"),
-            host=group.get("host", "127.0.0.1"),
-            path=group.get("path", "/webhook"),
-        )
+        client = QQAdapterClient(server_url=group["server_url"])
         await client.start(handler)
-        if not client.server_url:
-            logger.info("未配置 server_url，跳过服务端连接检测，仅监听 webhook")
         clients.append(client)
     try:
         await asyncio.Event().wait()
@@ -291,16 +289,13 @@ def run_all(*groups: dict):
     一次性阻塞启动多个客户端。
 
     每个 group 是一个字典，支持以下键:
-    - handler: 必传，消息处理回调
-    - port: 可选，监听端口，None 时自动分配
-    - server_url: 可选，服务端地址
-    - host: 可选，监听地址，默认 "127.0.0.1"
-    - path: 可选，webhook 路径，默认 "/webhook"
+    - handler:    必传，消息处理回调
+    - server_url: 必传，服务端地址
 
     用法:
         run_all(
-            {"handler": handler_a, "port": 5000},
-            {"handler": handler_b, "server_url": "http://127.0.0.1:8080"},
+            {"handler": handler_a, "server_url": "http://127.0.0.1:8080"},
+            {"handler": handler_b, "server_url": "http://10.0.0.1:8080"},
         )
     """
     if not groups:
@@ -311,6 +306,8 @@ def run_all(*groups: dict):
             raise TypeError(f"第 {i + 1} 个参数应为字典，实际类型: {type(group).__name__}")
         if "handler" not in group:
             raise ValueError(f"第 {i + 1} 个配置缺少必需的 'handler' 键")
+        if "server_url" not in group:
+            raise ValueError(f"第 {i + 1} 个配置缺少必需的 'server_url' 键")
         unknown = set(group.keys()) - _RUN_ALL_VALID_KEYS
         if unknown:
             raise ValueError(f"第 {i + 1} 个配置包含未知键: {unknown}")
