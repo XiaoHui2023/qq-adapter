@@ -14,6 +14,7 @@ import json
 import logging
 from dataclasses import asdict
 from typing import Callable, Union, Awaitable, Optional
+from urllib.parse import urlparse
 
 try:
     import aiohttp
@@ -61,7 +62,17 @@ class QQAdapterClient:
     """
 
     def __init__(self, server_url: str):
-        self.server_url = server_url.rstrip("/")
+        server_url = server_url.strip().rstrip("/")
+        # 无 scheme 时自动补全（如 "127.0.0.1:8080" -> "http://127.0.0.1:8080"）
+        if server_url and not server_url.startswith(("http://", "https://")):
+            server_url = "http://" + server_url
+        parsed = urlparse(server_url)
+        if parsed.hostname is None:
+            raise ValueError(
+                f"无效的 server_url: {server_url!r}，"
+                "请使用完整 URL（如 http://127.0.0.1:8080）或 host:port 格式"
+            )
+        self.server_url = server_url
 
         self._handler: Optional[MessageHandler] = None
         self._session: Optional[aiohttp.ClientSession] = None
@@ -106,8 +117,6 @@ class QQAdapterClient:
 
     async def _check_server(self) -> bool:
         """纯 TCP 连通性检测：只检查服务端 IP:端口是否可达"""
-        from urllib.parse import urlparse
-
         parsed = urlparse(self.server_url)
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
