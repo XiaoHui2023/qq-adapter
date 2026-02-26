@@ -40,9 +40,11 @@ class QQAdapterClient:
         client.run(handler)
 
     用法（多客户端）:
-        await client_a.start(handler_a)
-        await client_b.start(handler_b)
-        await asyncio.Event().wait()
+        from qq_adapter_protocol import run_all
+        run_all(
+            ("127.0.0.1", 5000, handler_a),
+            ("127.0.0.1", 5001, handler_b),
+        )
     """
 
     def __init__(
@@ -120,26 +122,30 @@ class QQAdapterClient:
         app = self._create_app()
         web.run_app(app, host=self.host, port=self.port)
 
-    @staticmethod
-    def run_all(*pairs: tuple["QQAdapterClient", MessageHandler]):
-        """
-        一次性阻塞启动多个客户端。
 
-        用法:
-            QQAdapterClient.run_all(
-                (client_a, handler_a),
-                (client_b, handler_b),
-            )
-        """
-        async def _main():
-            for client, handler in pairs:
-                await client.start(handler)
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                pass
-            finally:
-                for client, _ in pairs:
-                    await client.stop()
+async def _run_all_main(groups):
+    clients = []
+    for host, port, handler in groups:
+        client = QQAdapterClient(host, port)
+        await client.start(handler)
+        clients.append(client)
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        for client in clients:
+            await client.stop()
 
-        asyncio.run(_main())
+
+def run_all(*groups: tuple[str, int, MessageHandler]):
+    """
+    一次性阻塞启动多个客户端。
+
+    用法:
+        run_all(
+            ("127.0.0.1", 5000, handler_a),
+            ("127.0.0.1", 5001, handler_b),
+        )
+    """
+    asyncio.run(_run_all_main(groups))
