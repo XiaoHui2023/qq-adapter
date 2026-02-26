@@ -42,11 +42,6 @@ MSG_DEDUP_CACHE_SIZE = 1000
 MessageCallback = Callable[[MessageRequest], Awaitable[MessageResponse]]
 
 
-async def _default_callback(request: MessageRequest) -> MessageResponse:
-    """默认回调：原样回显消息内容"""
-    return MessageResponse(content=request.content)
-
-
 class QQBot:
     """QQ 开放平台 Bot 客户端"""
 
@@ -73,7 +68,7 @@ class QQBot:
         self.app_id = app_id
         self.app_secret = app_secret
         self.intents = intents
-        self.on_message: MessageCallback = on_message or _default_callback
+        self.on_message: MessageCallback = on_message
         self.proxy = proxy
 
         self._access_token: Optional[str] = None
@@ -286,8 +281,7 @@ class QQBot:
         try:
             await self.send_message(request.source, request.source_id,
                                     response.content, request.msg_id)
-            preview = (response.content[:100] if isinstance(response.content, str)
-                       else str(response.content)[:100])
+            preview = response.content[:100]
             logger.info("已回复消息 [%s] %s: %s", request.source.value,
                         request.sender_id, preview)
         except Exception:

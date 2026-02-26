@@ -65,7 +65,9 @@ class HttpServer:
                     msg_id = data.get("msg_id", "")
                     fut = self._pending.get(msg_id)
                     if fut and not fut.done():
-                        fut.set_result(MessageResponse(content=data.get("content")))
+                        content = data.get("content")
+                        logger.info("收到客户端回复 [%s]: %s", msg_id, content)
+                        fut.set_result(MessageResponse(content=content))
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     logger.warning("WebSocket 错误: %s", ws.exception())
         finally:
