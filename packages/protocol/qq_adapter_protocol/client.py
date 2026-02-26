@@ -2,7 +2,7 @@
 QQ Adapter Webhook 客户端
 
 封装 HTTP 服务器样板代码，用户只需提供回调函数即可处理消息。
-支持服务端健康检查、心跳检测、自动重连和生命周期事件。
+支持 TCP 连通性检测、心跳检测、自动重连和生命周期事件。
 
 依赖:
     pip install qq-adapter-protocol[client]
@@ -15,7 +15,7 @@ from dataclasses import asdict
 from typing import Callable, Union, Awaitable, Optional
 
 try:
-    from aiohttp import web, ClientSession, ClientError
+    from aiohttp import web
 except ImportError:
     raise ImportError(
         "客户端功能需要 aiohttp，请执行: pip install qq-adapter-protocol[client]"
@@ -36,7 +36,7 @@ class QQAdapterClient:
     QQ Adapter Webhook 客户端
 
     接收 QQ Adapter 服务端推送的消息，交给回调函数处理后返回回复。
-    可选连接服务端进行健康检查、心跳检测和断连感知。
+    可选连接服务端进行 TCP 连通性检测、心跳检测和断连感知。
 
     用法（单客户端）:
         client = QQAdapterClient("127.0.0.1", 5000, server_url="http://127.0.0.1:8080")
@@ -110,50 +110,48 @@ class QQAdapterClient:
 
     # -------- 服务端探测 --------
 
-    async def _check_server(self, session: ClientSession) -> bool:
-        """单次健康检查，返回是否成功"""
+    async def _check_server(self) -> bool:
+        """纯 TCP 连通性检测：只检查服务端 IP:端口是否可达"""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.server_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
         try:
-            async with session.get(
-                f"{self.server_url}/api/health", timeout=asyncio.timeout(5)
-            ) as resp:
-                return resp.status == 200
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=5
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
         except Exception:
             return False
 
-    async def _wait_for_server(self, timeout: float = 60, interval: float = 2):
-        """轮询服务端健康检查，直到连接成功或超时"""
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        async with ClientSession() as session:
-            while loop.time() < deadline:
-                if await self._check_server(session):
-                    self._connected = True
-                    logger.info("已连接到服务端: %s", self.server_url)
-                    await self._fire(self._on_connect)
-                    return
-                remaining = deadline - loop.time()
-                logger.info(
-                    "等待服务端就绪... (%s) 剩余 %.0fs",
-                    self.server_url, remaining,
-                )
-                await asyncio.sleep(interval)
-        raise TimeoutError(f"无法连接到服务端 {self.server_url}，超时 {timeout}s")
+    async def _wait_for_server(self, interval: float = 2):
+        """轮询服务端，直到连接成功（无限重试）"""
+        while True:
+            if await self._check_server():
+                self._connected = True
+                logger.info("已连接到服务端: %s", self.server_url)
+                await self._fire(self._on_connect)
+                return
+            logger.info("等待服务端就绪... (%s)", self.server_url)
+            await asyncio.sleep(interval)
 
     async def _heartbeat_loop(self, interval: float = 10):
         """后台心跳，检测服务端是否断连，断连后持续探测直到恢复"""
-        async with ClientSession() as session:
-            while True:
-                await asyncio.sleep(interval)
-                alive = await self._check_server(session)
+        while True:
+            await asyncio.sleep(interval)
+            alive = await self._check_server()
 
-                if alive and not self._connected:
-                    self._connected = True
-                    logger.info("服务端已重新连接: %s", self.server_url)
-                    await self._fire(self._on_connect)
-                elif not alive and self._connected:
-                    self._connected = False
-                    logger.warning("服务端连接已断开，等待重连... (%s)", self.server_url)
-                    await self._fire(self._on_disconnect)
+            if alive and not self._connected:
+                self._connected = True
+                logger.info("服务端已重新连接: %s", self.server_url)
+                await self._fire(self._on_connect)
+            elif not alive and self._connected:
+                self._connected = False
+                logger.warning("服务端连接已断开，等待重连... (%s)", self.server_url)
+                await self._fire(self._on_disconnect)
 
     # -------- Webhook 处理 --------
 

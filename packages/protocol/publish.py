@@ -10,13 +10,14 @@ import sys
 import shutil
 from pathlib import Path
 
-PYPROJECT = Path(__file__).parent / "pyproject.toml"
-DIST_DIR = Path(__file__).parent / "dist"
+SCRIPT_DIR = Path(__file__).resolve().parent
+PYPROJECT = SCRIPT_DIR / "pyproject.toml"
+DIST_DIR = SCRIPT_DIR / "dist"
 
 
 def run(cmd: str):
     print(f"\n>>> {cmd}")
-    result = subprocess.run(cmd, shell=True)
+    result = subprocess.run(cmd, shell=True, cwd=SCRIPT_DIR)
     if result.returncode != 0:
         print(f"\n命令失败 (exit code: {result.returncode})")
         sys.exit(result.returncode)
