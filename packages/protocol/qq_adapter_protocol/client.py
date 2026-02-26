@@ -202,9 +202,10 @@ class QQAdapterClient:
         )
 
         try:
-            result = self._handler(request)
-            if inspect.isawaitable(result):
-                result = await result
+            if inspect.iscoroutinefunction(self._handler):
+                result = await self._handler(request)
+            else:
+                result = await asyncio.to_thread(self._handler, request)
             if result is None:
                 result = MessageResponse(content=None)
         except Exception:

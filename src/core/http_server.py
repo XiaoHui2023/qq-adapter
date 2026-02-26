@@ -48,7 +48,7 @@ class HttpServer:
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         """GET /ws — WebSocket 连接入口"""
-        ws = web.WebSocketResponse(heartbeat=30)
+        ws = web.WebSocketResponse(heartbeat=120)
         await ws.prepare(request)
 
         self._clients.add(ws)
