@@ -12,10 +12,6 @@ from pydantic import BaseModel, Field
 import yaml
 
 
-class QQConfig(BaseModel):
-    sandbox: bool = Field(False, description="是否使用沙箱环境")
-
-
 class ServerConfig(BaseModel):
     host: str = Field("0.0.0.0", description="HTTP 监听地址")
     port: int = Field(8080, description="HTTP 监听端口")
@@ -28,7 +24,6 @@ class LogConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    qq: QQConfig = Field(default_factory=QQConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     log: LogConfig = Field(default_factory=LogConfig)
 
