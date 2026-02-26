@@ -23,4 +23,11 @@ qq-adapter-protocol — QQ Adapter 通信协议包
 
 from .models import MessageSource, MessageRequest, MessageResponse
 
-__all__ = ["MessageSource", "MessageRequest", "MessageResponse"]
+__all__ = ["MessageSource", "MessageRequest", "MessageResponse", "QQAdapterClient"]
+
+
+def __getattr__(name: str):
+    if name == "QQAdapterClient":
+        from .client import QQAdapterClient
+        return QQAdapterClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
