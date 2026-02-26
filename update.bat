@@ -8,5 +8,5 @@ if not exist .venv (
 
 call .venv\Scripts\activate.bat
 git pull
-pip install -r requirements.txt
+pip install --upgrade -r requirements.txt
 pause
