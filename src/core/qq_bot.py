@@ -9,7 +9,8 @@ QQ 开放平台 WebSocket 客户端
     - 去重: 同一条消息仅处理一次，防止重复回复
 
 WebSocket 协议流程:
-    Hello(op=10) → Identify(op=2) → Ready(op=0) → 心跳 + 事件循环
+    首次连接: Hello(op=10) → Identify(op=2) → Ready(op=0) → 心跳 + 事件循环
+    断线重连: Hello(op=10) → Resume(op=6) → 恢复会话 / Invalid Session → 全新连接
 """
 
 import asyncio
@@ -300,16 +301,43 @@ class QQBot:
     # -------- 主循环 --------
 
     async def run(self):
-        """启动 Bot：建立 HTTP 会话 → 连接 WebSocket → 进入事件循环"""
+        """启动 Bot：建立 HTTP 会话 → 连接/重连 WebSocket → 进入事件循环"""
         self._running = True
         self._session = aiohttp.ClientSession()
         try:
-            await self._connect()
+            while self._running:
+                reason = await self._try_connect()
+                if not self._running or reason == "stopped":
+                    break
+                if reason == "invalid_session":
+                    self._session_id = None
+                    self._seq = None
+                wait = 5
+                logger.info("将在 %d 秒后重连...", wait)
+                await asyncio.sleep(wait)
         finally:
             await self._cleanup()
 
-    async def _connect(self):
-        """完整的 WebSocket 连接流程：鉴权 → 获取网关 → Hello → Identify → Ready"""
+    async def _try_connect(self) -> str:
+        """尝试连接: 优先 Resume 恢复会话, 失败则全新 Identify。返回退出原因"""
+        if self._session_id and self._seq is not None:
+            try:
+                reason = await self._resume()
+                if reason != "invalid_session":
+                    return reason
+                logger.info("Resume 被拒绝, 将全新连接")
+            except Exception:
+                logger.exception("Resume 失败, 将全新连接")
+            self._session_id = None
+            self._seq = None
+        try:
+            return await self._connect()
+        except Exception:
+            logger.exception("连接异常")
+            return "error"
+
+    async def _connect(self) -> str:
+        """完整的 WebSocket 连接流程：鉴权 → 获取网关 → Hello → Identify → Ready → 事件循环"""
         token = await self._get_access_token()
 
         gw = await self.api_get("/gateway/bot")
@@ -361,7 +389,7 @@ class QQBot:
             )
 
             # 5. 进入事件循环
-            await self._event_loop(self._ws)
+            return await self._event_loop(self._ws)
         finally:
             if self._hb_task:
                 self._hb_task.cancel()
@@ -369,17 +397,54 @@ class QQBot:
             if not self._ws.closed:
                 await self._ws.close()
 
-    async def _event_loop(self, ws: aiohttp.ClientWebSocketResponse):
-        """WebSocket 事件循环：持续接收并分发服务端推送的事件"""
+    async def _resume(self) -> str:
+        """断线恢复：用 Resume(op=6) 携带 session_id 和 seq 恢复之前的会话"""
+        token = await self._get_access_token()
+
+        gw = await self.api_get("/gateway/bot")
+        if "url" not in gw:
+            raise RuntimeError(f"获取网关失败: {gw}")
+        ws_url = gw["url"]
+
+        self._ws = await self._http.ws_connect(ws_url, proxy=self.proxy)
+        try:
+            hello = await self._ws.receive_json()
+            if hello.get("op") != 10:
+                raise RuntimeError(f"期望 Hello(op=10), 收到 {hello}")
+            heartbeat_interval = hello["d"]["heartbeat_interval"] / 1000
+
+            await self._ws.send_json({
+                "op": 6,
+                "d": {
+                    "token": f"QQBot {token}",
+                    "session_id": self._session_id,
+                    "seq": self._seq,
+                },
+            })
+            logger.info("已发送 Resume, session=%s, seq=%s",
+                        self._session_id, self._seq)
+
+            self._hb_task = asyncio.create_task(
+                self._heartbeat_loop(self._ws, heartbeat_interval)
+            )
+            return await self._event_loop(self._ws)
+        finally:
+            if self._hb_task:
+                self._hb_task.cancel()
+                self._hb_task = None
+            if not self._ws.closed:
+                await self._ws.close()
+
+    async def _event_loop(self, ws: aiohttp.ClientWebSocketResponse) -> str:
+        """WebSocket 事件循环，返回退出原因: reconnect / invalid_session / closed / stopped"""
         async for msg in ws:
             if not self._running:
-                break
+                return "stopped"
 
             if msg.type == aiohttp.WSMsgType.TEXT:
                 payload = json.loads(msg.data)
                 op = payload.get("op")
 
-                # 更新序列号（用于心跳和断线重连）
                 if payload.get("s") is not None:
                     self._seq = payload["s"]
 
@@ -390,16 +455,17 @@ class QQBot:
                     logger.debug("心跳 ACK")
                 elif op == 7:     # Reconnect: 服务端要求重连
                     logger.warning("服务器要求重连")
-                    break
+                    return "reconnect"
                 elif op == 9:     # Invalid Session
                     logger.error("Invalid Session, 需重新鉴权")
-                    break
+                    return "invalid_session"
                 else:
                     logger.warning("未知 op=%s: %s", op, payload)
 
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 logger.warning("WebSocket 连接关闭: %s", msg)
-                break
+                return "closed"
+        return "closed"
 
     # -------- 停止 --------
 

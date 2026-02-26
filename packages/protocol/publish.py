@@ -1,15 +1,16 @@
 """
 PyPI 一键发布脚本
-用法:
-    python publish.py          # 发布到 PyPI
-    python publish.py --test   # 发布到 TestPyPI
+自动递增补丁版本号并发布到 PyPI
+用法: python publish.py
 """
 
+import re
 import subprocess
 import sys
 import shutil
 from pathlib import Path
 
+PYPROJECT = Path(__file__).parent / "pyproject.toml"
 DIST_DIR = Path(__file__).parent / "dist"
 
 
@@ -21,8 +22,25 @@ def run(cmd: str):
         sys.exit(result.returncode)
 
 
+def bump_version() -> str:
+    content = PYPROJECT.read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', content, re.MULTILINE)
+    if not match:
+        print("无法在 pyproject.toml 中找到版本号")
+        sys.exit(1)
+
+    major, minor, patch = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    old_version = f"{major}.{minor}.{patch}"
+    new_version = f"{major}.{minor}.{patch + 1}"
+
+    new_content = content.replace(f'version = "{old_version}"', f'version = "{new_version}"')
+    PYPROJECT.write_text(new_content, encoding="utf-8")
+    return new_version
+
+
 def main():
-    is_test = "--test" in sys.argv
+    new_version = bump_version()
+    print(f"版本号已更新为: {new_version}")
 
     if DIST_DIR.exists():
         print(f"清理 {DIST_DIR} ...")
@@ -31,12 +49,8 @@ def main():
     print("开始构建...")
     run("python -m build")
 
-    if is_test:
-        print("上传到 TestPyPI...")
-        run("python -m twine upload --repository testpypi dist/*")
-    else:
-        print("上传到 PyPI...")
-        run("python -m twine upload dist/*")
+    print("上传到 PyPI...")
+    run("python -m twine upload dist/*")
 
     print("\n发布完成！")
 
