@@ -286,8 +286,10 @@ class QQBot:
         try:
             await self.send_message(request.source, request.source_id,
                                     response.content, request.msg_id)
+            preview = (response.content[:100] if isinstance(response.content, str)
+                       else str(response.content)[:100])
             logger.info("已回复消息 [%s] %s: %s", request.source.value,
-                        request.sender_id, response.content[:100])
+                        request.sender_id, preview)
         except Exception:
             logger.exception("回复消息 %s 时出错", request.msg_id)
 
