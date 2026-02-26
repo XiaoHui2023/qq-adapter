@@ -9,4 +9,5 @@ if not exist .venv (
 call .venv\Scripts\activate.bat
 git pull
 pip install --upgrade -r requirements.txt
+pip install -e .\packages\protocol
 pause
