@@ -54,8 +54,8 @@ class QQAdapterClient:
     用法（多客户端）:
         from qq_adapter_protocol import run_all
         run_all(
-            (handler_a, 5000),
-            (handler_b, None, "http://127.0.0.1:8080"),
+            {"handler": handler_a, "port": 5000},
+            {"handler": handler_b, "server_url": "http://127.0.0.1:8080"},
         )
 
     port 为 None 时，操作系统会自动分配一个可用端口。
@@ -248,6 +248,8 @@ class QQAdapterClient:
 
         async def _main():
             await self.start(handler)
+            if not self.server_url:
+                logger.info("未配置 server_url，跳过服务端连接检测，仅监听 webhook")
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -258,14 +260,22 @@ class QQAdapterClient:
         asyncio.run(_main())
 
 
+_RUN_ALL_VALID_KEYS = {"handler", "port", "server_url", "host", "path"}
+
+
 async def _run_all_main(groups):
     clients = []
     for group in groups:
-        handler = group[0]
-        port = group[1] if len(group) > 1 else None
-        server_url = group[2] if len(group) > 2 else None
-        client = QQAdapterClient(port=port, server_url=server_url)
+        handler = group["handler"]
+        client = QQAdapterClient(
+            port=group.get("port"),
+            server_url=group.get("server_url"),
+            host=group.get("host", "127.0.0.1"),
+            path=group.get("path", "/webhook"),
+        )
         await client.start(handler)
+        if not client.server_url:
+            logger.info("未配置 server_url，跳过服务端连接检测，仅监听 webhook")
         clients.append(client)
     try:
         await asyncio.Event().wait()
@@ -276,19 +286,33 @@ async def _run_all_main(groups):
             await client.stop()
 
 
-def run_all(*groups):
+def run_all(*groups: dict):
     """
     一次性阻塞启动多个客户端。
 
-    每个 group 是一个元组: (handler, port, server_url)
+    每个 group 是一个字典，支持以下键:
     - handler: 必传，消息处理回调
     - port: 可选，监听端口，None 时自动分配
     - server_url: 可选，服务端地址
+    - host: 可选，监听地址，默认 "127.0.0.1"
+    - path: 可选，webhook 路径，默认 "/webhook"
 
     用法:
         run_all(
-            (handler_a, 5000),
-            (handler_b, None, "http://127.0.0.1:8080"),
+            {"handler": handler_a, "port": 5000},
+            {"handler": handler_b, "server_url": "http://127.0.0.1:8080"},
         )
     """
+    if not groups:
+        raise ValueError("run_all 至少需要一个客户端配置")
+
+    for i, group in enumerate(groups):
+        if not isinstance(group, dict):
+            raise TypeError(f"第 {i + 1} 个参数应为字典，实际类型: {type(group).__name__}")
+        if "handler" not in group:
+            raise ValueError(f"第 {i + 1} 个配置缺少必需的 'handler' 键")
+        unknown = set(group.keys()) - _RUN_ALL_VALID_KEYS
+        if unknown:
+            raise ValueError(f"第 {i + 1} 个配置包含未知键: {unknown}")
+
     asyncio.run(_run_all_main(groups))
